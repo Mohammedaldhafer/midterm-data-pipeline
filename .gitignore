@@ -20,3 +20,4 @@ reports/*.log
 # OS
 .DS_Store
 Thumbs.db
+elt_pipeline_current.txt
