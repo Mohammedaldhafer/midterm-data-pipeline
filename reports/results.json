@@ -1,0 +1,28 @@
+{
+    "id_run": "93894d51-be16-4cf8-ae1c-64421c9876f6",
+    "file_source": "C:\\midterm-data-pipeline\\data\\orders_test.csv",
+    "engine_used": "python_batch",
+    "batch_size": 2000,
+    "batches": 1,
+    "loaded_raw": 100,
+    "seconds_elapsed": 0.038,
+    "throughput": 2004.04,
+    "raw": 100,
+    "valid": 0,
+    "corrected": 0,
+    "quarantine": 100,
+    "inserted": 0,
+    "updated": 0,
+    "unchanged": 0,
+    "elapsed": 0.05,
+    "consistency": true,
+    "errors": {
+        "PRICE_UNKNOWN": 100
+    },
+    "file_name": "orders_test.csv",
+    "file_size_mb": 0.04,
+    "used_engine": "python_batch",
+    "pipeline_seconds_elapsed": 0.118,
+    "router_threshold_mb": 200,
+    "router_reason": "File size (0.04 MB) is less than or equal to the threshold (200 MB)."
+}
