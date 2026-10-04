@@ -280,6 +280,33 @@ Implemented endpoints:
 
 The `/ingest` endpoint reuses the existing `src.main.run_pipeline()` path instead of introducing a separate ingestion implementation.
 
+### Recommended Evaluator Flow
+
+```text
+1. Start MongoDB
+2. Initialize MongoDB collections
+3. Create/apply indexes
+4. Start FastAPI
+5. Open /docs
+6. Upload evaluator CSV through POST /ingest
+7. Run named queries and aggregation reports
+8. Refresh materialized views when Delta data is available
+9. Inspect scheduled jobs and run them manually when required
+```
+
+`POST /ingest` expects a multipart file upload using the field name `file`. The optional `batch_size` query parameter controls the existing pipeline batch size.
+
+Example:
+
+```text
+POST /ingest?batch_size=5000
+Content-Type: multipart/form-data
+
+file=<input.csv>
+```
+
+The endpoint passes the uploaded file through the same file router and pipeline used by the original project.
+
 ---
 
 # 🔎 Queries, Indexes & Explain
@@ -411,12 +438,14 @@ The views can be initialized once from the existing validated dataset:
 python -m src.materialized_views --init
 ```
 
-The latest project initialization produced:
+A verification run on the current project dataset produced:
 
 ```text
 daily_sales_summary  : 121
 top_products_summary : 6
 ```
+
+These counts are dataset-dependent verification evidence and are **not** required values for evaluator-supplied data.
 
 ### Preview
 
@@ -932,30 +961,34 @@ Swagger provides interactive access to the required endpoints.
 
 ## 🖥 Run the Main Pipeline
 
-Small dataset:
+Run the main pipeline with any evaluator-provided CSV:
+
+```powershell
+python .\src\main.py --input .\data\<input.csv>
+```
+
+For a known local dataset, for example:
 
 ```powershell
 python .\src\main.py --input .\data\orders_test.csv
 ```
 
-Large dataset:
-
-```powershell
-python .\src\main.py --input .\data\orders_huge_mixed_quality.csv
-```
-
-The router automatically selects Python Batch or PySpark based on the file size.
+The router automatically selects Python Batch or PySpark based on the file size. No specific filename or record count is required by the implementation.
 
 ---
 
 ## 🧪 Create a Smaller Sample
 
+Use any available large CSV as input:
+
 ```powershell
 python .\src\create_small_sample.py `
-  --input .\data\orders_huge_mixed_quality.csv `
+  --input .\data\<large-input.csv> `
   --output .\data\orders_sample.csv `
   --rows 100000
 ```
+
+The input filename is an example only; the pipeline is not tied to a specific dataset name.
 
 ---
 
@@ -1129,16 +1162,19 @@ OLDER   → ignored
 
 ## FastAPI Verification
 
-Verified endpoints include:
+Verified endpoint checks include:
 
 ```text
-GET  /health                 → 200
-GET  /queries                → 200
-GET  /aggregations           → 200
-GET  /jobs                   → 200
-POST /indexes                → 200
-POST /refresh-mv             → 200
-GET  /queries/{name}         → 200
+GET  /health                    → 200
+GET  /queries                   → 200
+GET  /queries/{name}            → 200
+GET  /aggregations              → 200
+GET  /aggregations/{name}      → 200
+GET  /jobs                      → 200
+POST /indexes                   → 200
+POST /refresh-mv                → 200
+POST /jobs/refresh_delta/run    → 200
+POST /ingest                    → 200 (real temporary CSV)
 ```
 
 Swagger:
@@ -1175,6 +1211,8 @@ status = success
 # 📚 Documentation
 
 Technical architecture documentation:
+
+[Technical Architecture](docs/architecture.md)
 
 ```text
 docs/architecture.md
@@ -1228,6 +1266,8 @@ Unified FastAPI
 ```
 
 The design intentionally avoids hard-coded evaluation results and supports different input datasets through dynamic parameter discovery and reusable processing functions.
+
+The recorded 30-million-record figures in this README are historical verification evidence only; they are not assumptions used by the runtime code and do not need to be reproduced during ordinary final-project evaluation.
 
 ---
 
