@@ -1,263 +1,281 @@
-﻿import argparse
+from __future__ import annotations
+
+import argparse
 import csv
-import sys
-import uuid
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 from pymongo import MongoClient
 
+# Support both execution modes:
+#   python .\\src\\incremental_loader.py
+# and:
+#   from src.incremental_loader import load_delta
+try:
+    from src.materialized_views import (
+        DAILY_SALES_COLLECTION,
+        TOP_PRODUCTS_COLLECTION,
+        apply_incremental_change,
+    )
+except ImportError:
+    from materialized_views import (
+        DAILY_SALES_COLLECTION,
+        TOP_PRODUCTS_COLLECTION,
+        apply_incremental_change,
+    )
+
 
 MONGO_URI = "mongodb://localhost:27017"
-MONGO_DATABASE = "midterm_data_pipeline"
-VALIDATED_COLLECTION = "orders_validated"
+DATABASE_NAME = "midterm_data_pipeline"
+COLLECTION_NAME = "orders_validated"
 
 
-def get_mongo_client() -> MongoClient:
+def get_database():
+    """Connect to MongoDB and return the project database."""
+
     client = MongoClient(
         MONGO_URI,
-        serverSelectionTimeoutMS=10000
+        serverSelectionTimeoutMS=5000,
     )
     client.admin.command("ping")
-    return client
+    return client, client[DATABASE_NAME]
 
 
-def parse_version(value: str) -> int:
+def parse_version(value: Any) -> int:
+    """Convert a Delta version value to an integer."""
+
     try:
-        version = int(value)
-    except (TypeError, ValueError):
+        return int(str(value).strip())
+    except (TypeError, ValueError) as exc:
         raise ValueError(
             f"Invalid version value: {value!r}"
-        )
+        ) from exc
 
-    if version < 1:
+
+def normalize_document(row: dict[str, Any]) -> dict[str, Any]:
+    """
+    Convert one CSV Delta row into a validated-order document.
+
+    order_id is used as the business key and version controls conflicts.
+    """
+
+    order_id = str(
+        row.get("order_id", "")
+    ).strip()
+
+    if not order_id:
         raise ValueError(
-            "version must be greater than or equal to 1."
+            "Delta row is missing required field: order_id"
         )
 
-    return version
+    version = parse_version(
+        row.get("version")
+    )
+
+    document = dict(row)
+
+    document["id_order"] = order_id
+    document["version"] = version
+
+    return document
+
+
+def materialized_views_ready(db) -> bool:
+    """
+    Return True only when both materialized views already exist.
+
+    Incremental changes are not applied to partially initialized views.
+    """
+
+    existing = set(
+        db.list_collection_names()
+    )
+
+    return (
+        DAILY_SALES_COLLECTION in existing
+        and TOP_PRODUCTS_COLLECTION in existing
+    )
 
 
 def load_delta(
-    input_file: str,
+    input_file: str | Path,
     mongo_uri: str = MONGO_URI,
-    database_name: str = MONGO_DATABASE,
-    collection_name: str = VALIDATED_COLLECTION,
-) -> Dict[str, Any]:
+    database_name: str = DATABASE_NAME,
+    collection_name: str = COLLECTION_NAME,
+) -> dict[str, int | bool]:
+    """
+    Load a Delta CSV using version-aware Insert / Update / Unchanged / Older
+    semantics and update materialized views incrementally when initialized.
+
+    The same Delta replay is idempotent because equal versions are unchanged.
+    Older versions are ignored and cannot overwrite newer records.
+    """
 
     input_path = Path(input_file)
 
     if not input_path.exists():
         raise FileNotFoundError(
-            f"Delta file does not exist: {input_path}"
+            f"Delta file not found: {input_path}"
         )
 
-    if not input_path.is_file():
-        raise ValueError(
-            f"Delta path is not a file: {input_path}"
-        )
-
-    run_id = str(uuid.uuid4())
-    started_at = datetime.now(timezone.utc)
-
-    count_inserted = 0
-    count_updated = 0
-    count_unchanged = 0
-    count_older = 0
-    count_processed = 0
-
-    client = get_mongo_client()
+    client = MongoClient(
+        mongo_uri,
+        serverSelectionTimeoutMS=5000,
+    )
 
     try:
-        collection = client[
-            database_name
-        ][
-            collection_name
-        ]
+        db = client[database_name]
+        collection = db[collection_name]
 
         collection.create_index(
             [("id_order", 1)],
             unique=True,
-            name="unique_id_order"
+            name="unique_id_order",
         )
+
+        mv_enabled = (
+            apply_incremental_change is not None
+            and materialized_views_ready(db)
+        )
+
+        count_processed = 0
+        count_inserted = 0
+        count_updated = 0
+        count_unchanged = 0
+        count_older = 0
+        count_mv_applied = 0
 
         with input_path.open(
             "r",
             encoding="utf-8-sig",
-            newline=""
+            newline="",
         ) as file:
 
             reader = csv.DictReader(file)
 
             if not reader.fieldnames:
                 raise ValueError(
-                    "Delta file has no header."
+                    "Delta CSV has no header."
                 )
 
-            required_fields = {
+            required = {
                 "order_id",
-                "version"
+                "version",
             }
 
-            missing_fields = (
-                required_fields
-                - set(reader.fieldnames)
+            missing = required.difference(
+                reader.fieldnames
             )
 
-            if missing_fields:
+            if missing:
                 raise ValueError(
-                    "Delta file is missing required "
-                    f"fields: {sorted(missing_fields)}"
+                    "Delta CSV is missing required fields: "
+                    + ", ".join(sorted(missing))
                 )
 
             for row in reader:
-
                 count_processed += 1
 
-                order_id = (
-                    row.get("order_id") or ""
-                ).strip()
+                new_document = normalize_document(row)
 
-                if not order_id:
-                    raise ValueError(
-                        "Delta contains a row "
-                        "with an empty order_id."
-                    )
-
-                version = parse_version(
-                    row.get("version")
-                )
+                order_id = new_document["id_order"]
+                new_version = new_document["version"]
 
                 existing = collection.find_one(
-                    {
-                        "id_order": order_id
-                    }
+                    {"id_order": order_id}
                 )
 
-                new_document = dict(row)
-
-                new_document["id_order"] = order_id
-                new_document["version"] = version
-                new_document["incremental_run_id"] = run_id
-                new_document["incremental_loaded_at"] = started_at
-
                 if existing is None:
-
                     collection.insert_one(
                         new_document
                     )
 
                     count_inserted += 1
+
+                    if mv_enabled:
+                        result = apply_incremental_change(
+                            db,
+                            None,
+                            new_document,
+                        )
+                        if result.get("applied"):
+                            count_mv_applied += 1
+
                     continue
 
-                existing_version = existing.get(
-                    "version"
+                existing_version = parse_version(
+                    existing.get("version", 0)
                 )
 
-                if existing_version is None:
-                    existing_version = 0
-
-                try:
-                    existing_version = int(
-                        existing_version
-                    )
-                except (TypeError, ValueError):
-                    existing_version = 0
-
-                if version > existing_version:
-
-                    collection.update_one(
-                        {
-                            "id_order": order_id
-                        },
-                        {
-                            "$set": new_document
-                        }
-                    )
-
-                    count_updated += 1
-
-                elif version == existing_version:
-
+                if new_version == existing_version:
                     count_unchanged += 1
+                    continue
 
-                else:
-
+                if new_version < existing_version:
                     count_older += 1
+                    continue
+
+                collection.replace_one(
+                    {"id_order": order_id},
+                    new_document,
+                    upsert=False,
+                )
+
+                count_updated += 1
+
+                if mv_enabled:
+                    result = apply_incremental_change(
+                        db,
+                        existing,
+                        new_document,
+                    )
+
+                    if result.get("applied"):
+                        count_mv_applied += 1
 
         return {
-            "id_run": run_id,
-            "file_name": input_path.name,
             "count_processed": count_processed,
             "count_inserted": count_inserted,
             "count_updated": count_updated,
             "count_unchanged": count_unchanged,
             "count_older": count_older,
-            "loaded_at": started_at.isoformat()
+            "count_mv_applied": count_mv_applied,
+            "materialized_views_enabled": mv_enabled,
         }
 
     finally:
         client.close()
 
 
-def main() -> None:
-
+def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Path B incremental Delta loader "
-            "with version-based conflict handling."
+            "Version-aware incremental Delta loader "
+            "with optional incremental materialized-view refresh."
         )
     )
 
     parser.add_argument(
         "--input",
         required=True,
-        help="Incremental Delta CSV file."
+        help="Path to the Delta CSV file.",
     )
 
     args = parser.parse_args()
 
-    try:
+    result = load_delta(
+        args.input
+    )
 
-        result = load_delta(
-            args.input
-        )
+    print("=" * 80)
+    print("INCREMENTAL DELTA LOAD")
+    print("=" * 80)
 
-        print()
-        print("=" * 75)
-        print("INCREMENTAL DELTA LOAD COMPLETED")
-        print("=" * 75)
-
-        for key, value in result.items():
-            print(
-                f"{key:<22}: {value}"
-            )
-
-        print("=" * 75)
-
-    except KeyboardInterrupt:
-
+    for key, value in result.items():
+        label = key.replace("_", " ")
         print(
-            "\nIncremental load interrupted."
+            f"{label:<30}: {value}"
         )
-        sys.exit(1)
-
-    except Exception as error:
-
-        print()
-        print("=" * 75)
-        print("INCREMENTAL LOAD ERROR")
-        print("=" * 75)
-        print(
-            f"{type(error).__name__}: {error}"
-        )
-        print(
-            str(error)
-        )
-        print("=" * 75)
-
-        sys.exit(1)
 
 
 if __name__ == "__main__":
