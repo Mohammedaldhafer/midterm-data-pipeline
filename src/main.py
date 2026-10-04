@@ -6,9 +6,15 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+SRC_ROOT = Path(__file__).resolve().parent
 
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+# Keep legacy absolute imports inside existing src modules working when
+# src.main is imported as a package (for example by FastAPI).
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
 
 
 from config.settings import (
@@ -17,13 +23,20 @@ from config.settings import (
 )
 
 
-from file_router import select_engine
-
-from batch_loader import load_csv_to_raw
-
-from spark_loader import load_csv_to_raw as load_csv_spark
-
-from elt_pipeline import process_run
+# Support both:
+#   python .\src\main.py
+#   python -m src.main
+# and importing src.main from the FastAPI application.
+try:
+    from .file_router import select_engine
+    from .batch_loader import load_csv_to_raw
+    from .spark_loader import load_csv_to_raw as load_csv_spark
+    from .elt_pipeline import process_run
+except ImportError:
+    from file_router import select_engine
+    from batch_loader import load_csv_to_raw
+    from spark_loader import load_csv_to_raw as load_csv_spark
+    from elt_pipeline import process_run
 
 
 def save_results(results):
@@ -210,43 +223,36 @@ def run_pipeline(
         f"{final_results['used_engine']}"
     )
 
-    # process_run() returns "raw", not "loaded_raw"
     print(
         f"Raw                 : "
         f"{final_results['raw']:,}"
     )
 
-    # process_run() returns "valid"
     print(
         f"Valid               : "
         f"{final_results['valid']:,}"
     )
 
-    # process_run() returns "corrected"
     print(
         f"Corrected           : "
         f"{final_results['corrected']:,}"
     )
 
-    # process_run() returns "quarantine"
     print(
         f"Quarantine          : "
         f"{final_results['quarantine']:,}"
     )
 
-    # process_run() returns "inserted"
     print(
         f"Inserted            : "
         f"{final_results['inserted']:,}"
     )
 
-    # process_run() returns "updated"
     print(
         f"Updated             : "
         f"{final_results['updated']:,}"
     )
 
-    # process_run() returns "unchanged"
     print(
         f"Unchanged           : "
         f"{final_results['unchanged']:,}"
