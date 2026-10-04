@@ -21,3 +21,6 @@ reports/*.log
 .DS_Store
 Thumbs.db
 elt_pipeline_current.txt
+
+# Runtime logs
+logs/
